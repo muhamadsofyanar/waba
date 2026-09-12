@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
@@ -13,6 +13,7 @@ const config = {
   apiUrl: process.env.ONESENDER_API_URL || '',
   apiKey: process.env.ONESENDER_API_KEY || '',
   starKey: process.env.STARSENDER_DEVICE_API_KEY || '',
+  webhookToken: process.env.INBOUND_WEBHOOK_TOKEN || '',
   interval: Math.max(15, Number(process.env.SEND_INTERVAL_SECONDS || 30)) * 1000,
 };
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -50,11 +51,18 @@ if (!db.prepare('PRAGMA table_info(campaigns)').all().some(x=>x.name==='provider
 const contactColumns = new Set(db.prepare('PRAGMA table_info(contacts)').all().map(x=>x.name));
 if (!contactColumns.has('stage')) db.exec("ALTER TABLE contacts ADD COLUMN stage TEXT NOT NULL DEFAULT 'baru'");
 if (!contactColumns.has('follow_up_at')) db.exec('ALTER TABLE contacts ADD COLUMN follow_up_at TEXT');
+if (!db.prepare('PRAGMA table_info(deliveries)').all().some(x=>x.name==='sent_body')) db.exec('ALTER TABLE deliveries ADD COLUMN sent_body TEXT');
 db.exec(`CREATE TABLE IF NOT EXISTS contact_activities (
  id INTEGER PRIMARY KEY, contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
  kind TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS crm_follow_up ON contacts(follow_up_at);
 CREATE INDEX IF NOT EXISTS crm_activity_contact ON contact_activities(contact_id,id);`);
+db.exec(`CREATE TABLE IF NOT EXISTS inbound_messages (
+ id INTEGER PRIMARY KEY, contact_id INTEGER NOT NULL REFERENCES contacts(id),
+ provider TEXT NOT NULL, external_id TEXT, body TEXT NOT NULL,
+ received_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(provider,external_id));
+CREATE INDEX IF NOT EXISTS inbound_contact ON inbound_messages(contact_id,id);`);
 // A restart during an in-flight HTTP request has an uncertain result: do not repeat it.
 db.exec(`UPDATE deliveries SET state='unknown', error='Proses terhenti saat permintaan dikirim; periksa log OneSender' WHERE state='sending';
 UPDATE campaigns SET state='paused' WHERE state='running' AND id IN (SELECT campaign_id FROM deliveries WHERE state='unknown');`);
@@ -94,7 +102,7 @@ function auth(req) {
   return db.prepare('SELECT csrf FROM sessions WHERE token_hash=? AND expires_at>?').get(hash(token), Date.now());
 }
 function html(res, title, body, status = 200, session = null, extra = {}) {
-  const nav = session ? `<nav><a href="/">Ringkasan</a><a href="/contacts">Kontak</a><a href="/campaigns">Kampanye</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="${esc(session.csrf)}"><button>Keluar</button></form></nav>` : '';
+  const nav = session ? `<nav><a href="/">Ringkasan</a><a href="/inbox">Pesan masuk</a><a href="/contacts">Kontak</a><a href="/campaigns">Kampanye</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="${esc(session.csrf)}"><button>Keluar</button></form></nav>` : '';
   const page = `<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · WA CRM</title><style>
   :root{font-family:Inter,system-ui,Arial,sans-serif;color:#162823;background:#f5f8f7}*{box-sizing:border-box}body{margin:0}header{background:#fff;border-bottom:1px solid #d9e4df;padding:17px max(calc((100vw - 1100px)/2),24px);display:flex;align-items:center;gap:32px;flex-wrap:wrap}header strong{color:#08784f;font-size:21px}nav{display:flex;align-items:center;gap:20px;flex-wrap:wrap}a{color:#08784f;text-decoration:none}nav a{font-weight:600}main{max-width:1100px;margin:30px auto;padding:0 24px}h1{font-size:27px;margin:0 0 18px}h2{font-size:19px}section,.card{background:white;border:1px solid #dde6e1;border-radius:13px;padding:22px;margin:16px 0;box-shadow:0 2px 9px #143b2210}label{display:block;font-size:14px;font-weight:650;margin:15px 0 5px}input,textarea,select{width:100%;max-width:650px;border:1px solid #cbd8d1;border-radius:8px;font:inherit;padding:11px}input[type=checkbox]{width:auto}textarea{min-height:115px}button,.button{display:inline-block;background:#08784f;color:white;border:0;border-radius:8px;padding:10px 16px;font:inherit;font-weight:650;cursor:pointer;margin:8px 7px 0 0}button.alt{background:#eaf4ef;color:#07573b}.hint{color:#566a61;font-size:14px}.error{color:#a72020}.success{color:#067347}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #e8eeeb;padding:10px;vertical-align:top}th{color:#54645c}td form{display:inline}td button{padding:6px 9px;font-size:13px}.scroll{overflow:auto}.row{display:flex;gap:16px;flex-wrap:wrap}.row>*{flex:1;min-width:190px}.badge{background:#e7f5ec;color:#075e3d;padding:4px 8px;border-radius:5px}.timeline{border-left:2px solid #cde3d5;padding:4px 0 4px 18px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}.timeline small{display:block;margin-top:4px}code{white-space:pre-wrap;overflow-wrap:anywhere}.stats{font-size:28px;font-weight:750;color:#08784f}small{color:#687b71}@media(max-width:650px){table{min-width:650px}main{margin:18px auto}}
   </style></head><body><header><strong>WA CRM</strong>${nav}</header><main>${body}</main></body></html>`;
@@ -147,11 +155,42 @@ function renderContact(res,s,id) {
   if(!c) return err(res,'Kontak tidak ditemukan',s,404);
   const activities=db.prepare('SELECT * FROM contact_activities WHERE contact_id=? ORDER BY id DESC LIMIT 100').all(id);
   const deliveries=db.prepare('SELECT d.state,d.updated_at,k.title,k.id campaign_id FROM deliveries d JOIN campaigns k ON k.id=d.campaign_id WHERE d.contact_id=? ORDER BY d.id DESC LIMIT 30').all(id);
+  const messages=db.prepare('SELECT * FROM inbound_messages WHERE contact_id=? ORDER BY id DESC LIMIT 100').all(id);
+  const outbound=db.prepare("SELECT sent_body,updated_at FROM deliveries WHERE contact_id=? AND state='accepted' AND sent_body IS NOT NULL ORDER BY id DESC LIMIT 100").all(id);
+  const conversation=[...messages.map(m=>({id:m.id,kind:'in',body:m.body,time:m.received_at,source:m.provider})),...outbound.map((d,i)=>({id:i,kind:'out',body:d.sent_body,time:d.updated_at.replace(' ','T')+'Z',source:'kampanye'}))].sort((a,b)=>new Date(b.time)-new Date(a.time)||b.id-a.id).slice(0,100);
   const localDate=c.follow_up_at ? new Date(new Date(c.follow_up_at).getTime()+7*3600000).toISOString().slice(0,16) : '';
   html(res,c.name,`<p><a href="/contacts">← Daftar kontak</a></p><h1>${esc(c.name)}</h1><p class="hint">${esc(c.phone)} · ${c.opted_out?'Berhenti berlangganan':c.consented?'Berizin':'Belum memberi izin'}</p>
   <section><h2>Profil dan tindak lanjut</h2><form method="post" action="/contacts/${id}/profile">${csrf(s)}<div class="row"><div><label>Nama</label><input name="name" required maxlength="120" value="${esc(c.name)}"></div><div><label>Tag segmen</label><input name="tag" maxlength="60" value="${esc(c.tag)}"></div><div><label>Tahap</label><select name="stage">${stages.map(x=>`<option value="${x}" ${c.stage===x?'selected':''}>${x}</option>`).join('')}</select></div></div><label>Jadwal tindak lanjut (WIB)</label><input name="follow_up" type="datetime-local" value="${esc(localDate)}"><p class="hint">Kosongkan tanggal jika tindak lanjut sudah selesai. Tidak mengirim pesan otomatis.</p><label>Catatan profil</label><textarea name="note" maxlength="500">${esc(c.note)}</textarea><button>Simpan profil</button></form></section>
   <section><h2>Riwayat aktivitas</h2><form method="post" action="/contacts/${id}/activities">${csrf(s)}<label>Catat telepon, chat, pertemuan, atau hasil tindak lanjut</label><textarea name="content" maxlength="1000" required></textarea><button>Tambah aktivitas</button></form>${activities.map(a=>`<div class="timeline">${esc(a.content)}<small>${esc(dateWib(a.created_at.replace(' ','T')+'Z'))}</small></div>`).join('')||'<p class="hint">Belum ada aktivitas.</p>'}</section>
+  <section><h2>Riwayat pesan terbaru</h2>${conversation.map(m=>`<div class="timeline"><strong>${m.kind==='in'?'Masuk':'Keluar (diterima gateway)'}</strong><br>${esc(m.body)}<small>${esc(dateWib(m.time))} · ${esc(m.source)}</small></div>`).join('')||'<p class="hint">Belum ada pesan baru. Riwayat WhatsApp sebelum webhook aktif tidak diimpor otomatis.</p>'}<p class="hint">Pesan keluar berlabel “diterima gateway” belum tentu tersampaikan atau dibaca.</p></section>
   <section><h2>Riwayat kampanye</h2><div class="scroll"><table><tr><th>Kampanye</th><th>Status</th><th>Waktu</th></tr>${deliveries.map(d=>`<tr><td><a href="/campaigns/${d.campaign_id}">${esc(d.title)}</a></td><td>${esc(d.state)}</td><td>${esc(dateWib(d.updated_at.replace(' ','T')+'Z'))}</td></tr>`).join('')}</table></div><p class="hint">Status accepted hanya berarti gateway menerima permintaan.</p></section>`,200,s);
+}
+function renderInbox(res,s) {
+  const messages=db.prepare('SELECT m.*,c.name,c.phone FROM inbound_messages m JOIN contacts c ON c.id=m.contact_id ORDER BY m.id DESC LIMIT 100').all();
+  html(res,'Pesan masuk',`<h1>Pesan masuk</h1><p class="hint">Hanya pesan sejak webhook diaktifkan. Riwayat lama di aplikasi WhatsApp tidak disalin otomatis.</p><section>${messages.length?`<div class="scroll"><table><tr><th>Kontak</th><th>Pesan</th><th>Waktu</th></tr>${messages.map(m=>`<tr><td><a href="/contacts/${m.contact_id}">${esc(m.name)}</a><br><small>${esc(m.phone)}</small></td><td>${esc(m.body)}</td><td>${esc(dateWib(m.received_at))}</td></tr>`).join('')}</table></div>`:'<p>Belum ada pesan masuk. Aktifkan webhook dan uji dengan nomor lain.</p>'}</section>`,200,s);
+}
+function receiveStarSender(data) {
+  if(!data || Array.isArray(data) || typeof data!=='object') throw new Error('Format webhook tidak valid');
+  const rawFrom=String(data.from ?? '');
+  if(/@g\.us$|@broadcast$/i.test(rawFrom)) return;
+  const phone=normalizePhone(rawFrom.replace(/@(?:s\.whatsapp\.net|c\.us)$/i,''));
+  if(typeof data.message!=='string' || !data.message.trim() || data.message.length>10000) throw new Error('Isi pesan tidak valid');
+  const externalId=data.id ?? data.message_id ?? null;
+  if(externalId!==null && (typeof externalId!=='string' && typeof externalId!=='number' || String(externalId).length>200)) throw new Error('ID pesan tidak valid');
+  const dedupId=externalId===null && data.timestamp!==undefined ? createHash('sha256').update(JSON.stringify([data.device??'',phone,data.timestamp,data.message])).digest('hex') : externalId;
+  let received=new Date();
+  if(data.timestamp!==undefined && data.timestamp!==null && data.timestamp!=='') {
+    const num=Number(data.timestamp);
+    received=Number.isFinite(num) ? new Date(num<1e12?num*1000:num) : new Date(String(data.timestamp));
+    if(!Number.isFinite(received.getTime())) throw new Error('Timestamp tidak valid');
+  }
+  db.exec('BEGIN');try {
+    db.prepare('INSERT INTO contacts(name,phone,consented) VALUES(?,?,0) ON CONFLICT(phone) DO NOTHING').run(phone,phone);
+    const id=db.prepare('SELECT id FROM contacts WHERE phone=?').get(phone).id;
+    db.prepare('INSERT OR IGNORE INTO inbound_messages(contact_id,provider,external_id,body,received_at) VALUES(?,?,?,?,?)')
+      .run(id,'starsender',dedupId===null?null:String(dedupId),data.message.trim(),received.toISOString());
+    db.exec('COMMIT');
+  }catch(e){db.exec('ROLLBACK');throw e;}
 }
 function renderCampaigns(res,s) {
   const campaigns=db.prepare(`SELECT c.*, (SELECT count(*) FROM deliveries d WHERE d.campaign_id=c.id) total,
@@ -188,7 +227,7 @@ export async function sendOne() {
     const response=(await reply.text()).slice(0,1000);
     let parsed={}; try{parsed=JSON.parse(response);}catch{}
     const accepted=star ? (reply.ok && parsed.success===true) : (reply.ok && (String(parsed.code)==='200' || parsed.success===true) && !parsed.error && parsed.success!==false);
-    if(accepted) db.prepare("UPDATE deliveries SET state='accepted',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(job.id);
+    if(accepted) db.prepare("UPDATE deliveries SET state='accepted',sent_body=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(body,job.id);
     else if((reply.status>=400 && reply.status<500) || (reply.ok && (parsed.success===false || parsed.error || (parsed.code && String(parsed.code)!=='200')))) {
       db.prepare("UPDATE deliveries SET state='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(`HTTP ${reply.status}: ${response.slice(0,300)}`,job.id);
       if(reply.status===401||reply.status===403||reply.status===429) db.prepare("UPDATE campaigns SET state='paused' WHERE id=?").run(job.campaign_id);
@@ -211,6 +250,21 @@ function housekeeping(){
 export async function handler(req,res) {
   const url=new URL(req.url,'http://localhost'); const pathname=url.pathname;
   if(pathname==='/health'){res.writeHead(200,{'content-type':'text/plain'});return res.end('ok');}
+  if(pathname.startsWith('/webhooks/starsender/')) {
+    const token=pathname.slice('/webhooks/starsender/'.length);
+    if(!config.webhookToken || config.webhookToken.length<32 || !equal(token,config.webhookToken)) {
+      res.writeHead(404);return res.end();
+    }
+    if(req.method!=='POST') {res.writeHead(405);return res.end();}
+    try {
+      if(!/^application\/json(?:;|$)/i.test(String(req.headers['content-type']||''))) throw new Error('Content-Type harus application/json');
+      receiveStarSender(JSON.parse(await read(req,20_000)));
+      res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});return res.end('{"ok":true}');
+    }catch(e){
+      console.error('Webhook ditolak:',e.message);
+      res.writeHead(400,{'content-type':'application/json','cache-control':'no-store'});return res.end('{"ok":false}');
+    }
+  }
   const s=auth(req);
   if(req.method==='GET' && pathname==='/login') return html(res,'Masuk',`<h1>Masuk</h1><section><form method="post" action="/login"><label>Email</label><input required type="email" name="email"><label>Kata sandi</label><input required type="password" name="password"><button>Masuk</button></form></section>`);
   try {
@@ -299,6 +353,7 @@ export async function handler(req,res) {
       return html(res,'Ringkasan',`<h1>Ringkasan</h1><p class="hint">Pantau kontak, tindak lanjut, dan pengiriman dari satu tempat.</p><div class="row"><section><small>Kontak</small><div class="stats">${n}</div></section><section><small>Kontak berizin</small><div class="stats">${contactCount()}</div></section><section><small>Perlu ditindaklanjuti</small><div class="stats">${db.prepare('SELECT count(*) n FROM contacts WHERE follow_up_at IS NOT NULL AND follow_up_at<=?').get(new Date().toISOString()).n}</div></section><section><small>Kampanye</small><div class="stats">${c}</div></section><section><small>Diterima gateway</small><div class="stats">${a}</div></section></div><section><h2>Tindak lanjut jatuh tempo</h2>${due.length?`<div class="scroll"><table><tr><th>Kontak</th><th>Tahap</th><th>Jadwal</th></tr>${due.map(x=>`<tr><td><a href="/contacts/${x.id}">${esc(x.name)}</a><br><small>${esc(x.phone)}</small></td><td>${esc(x.stage)}</td><td>${esc(dateWib(x.follow_up_at))}</td></tr>`).join('')}</table></div>`:'<p class="hint">Tidak ada tindak lanjut yang jatuh tempo.</p>'}</section><section><h2>Jadwal berikutnya</h2>${upcoming.length?`<div class="scroll"><table><tr><th>Kontak</th><th>Tahap</th><th>Jadwal</th></tr>${upcoming.map(x=>`<tr><td><a href="/contacts/${x.id}">${esc(x.name)}</a></td><td>${esc(x.stage)}</td><td>${esc(dateWib(x.follow_up_at))}</td></tr>`).join('')}</table></div>`:'<p class="hint">Belum ada jadwal berikutnya.</p>'}<p><a class="button" href="/contacts">Kelola kontak</a><a class="button" href="/campaigns">Buka kampanye</a></p></section>`,200,s);
     }
     if(req.method==='GET' && pathname==='/contacts') return renderContacts(res,s,url.searchParams.get('q'));
+    if(req.method==='GET' && pathname==='/inbox') return renderInbox(res,s);
     const contactId=pathname.match(/^\/contacts\/(\d+)$/);
     if(req.method==='GET' && contactId) return renderContact(res,s,Number(contactId[1]));
     if(req.method==='GET' && pathname==='/campaigns') return renderCampaigns(res,s);

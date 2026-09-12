@@ -41,6 +41,7 @@ for (const provider of ['onesender','starsender']) test(`kontak → kampanye →
     globalThis.fetch=async(url,opts)=>{outbound={url,opts};return new Response(JSON.stringify(provider==='onesender'?{code:200}:{success:true}),{status:200});};
     await app.sendOne();
     assert.equal(db.prepare('SELECT state FROM deliveries').get().state,'accepted');
+    assert.equal(db.prepare('SELECT sent_body FROM deliveries').get().sent_body,'Halo Alice');
     assert.equal(db.prepare('SELECT state FROM campaigns').get().state,'done');
     const payload=JSON.parse(outbound.opts.body);
     assert.equal(payload.to,'6281234567890');
@@ -79,5 +80,30 @@ test('migrasi database lama, profil dan riwayat kontak, serta tindak lanjut', as
     assert.equal((await post('/contacts/1/profile',{name:'Siti',stage:'negosiasi',follow_up:'2020-02-31T09:00'})).status,400);
     assert.equal((await post('/contacts/1/profile',{name:'Siti',stage:'pelanggan',follow_up:''})).status,303);
     assert.equal(db.prepare('SELECT follow_up_at FROM contacts WHERE id=1').get().follow_up_at,null);
+  } finally {db.close();server.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('webhook StarSender menyimpan chat masuk tanpa memberi izin blast dan menolak token salah', async () => {
+  const dir=mkdtempSync(path.join(tmpdir(),'wacrm-inbound-'));
+  const token='fedcba9876543210fedcba9876543210';
+  Object.assign(process.env,{DATA_DIR:dir,ADMIN_EMAIL:'admin@test.local',ADMIN_PASSWORD:'a strong test password',SESSION_SECRET:'0123456789abcdef0123456789abcdef',INBOUND_WEBHOOK_TOKEN:token});
+  const app=await import('../src/app.mjs?inbound');
+  const server=http.createServer(app.handler);await new Promise(ok=>server.listen(0,'127.0.0.1',ok));
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const db=new DatabaseSync(path.join(dir,'crm.db'));
+  try {
+    const payload={from:'6281234567890@c.us',message:'Halo <script>alert(1)</script>',timestamp:1789200000,id:'message-1'};
+    const send=(key,data)=>fetch(base+`/webhooks/starsender/${key}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data)});
+    assert.equal((await send('wrong',payload)).status,404);
+    assert.equal((await send(token,payload)).status,200);
+    assert.equal((await send(token,payload)).status,200);
+    assert.equal(db.prepare('SELECT count(*) n FROM inbound_messages').get().n,1);
+    assert.equal(db.prepare('SELECT consented FROM contacts WHERE phone=?').get('6281234567890').consented,0);
+    assert.equal((await send(token,{from:'123@g.us',message:'grup'})).status,200);
+    assert.equal(db.prepare('SELECT count(*) n FROM inbound_messages').get().n,1);
+    const login=await fetch(base+'/login',{method:'POST',body:new URLSearchParams({email:'admin@test.local',password:'a strong test password'}),redirect:'manual'});
+    const cookie=login.headers.get('set-cookie').split(';')[0];
+    const inbox=await fetch(base+'/inbox',{headers:{cookie}});
+    assert.match(await inbox.text(),/Halo &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   } finally {db.close();server.close();rmSync(dir,{recursive:true,force:true});}
 });
