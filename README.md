@@ -1,6 +1,14 @@
 # WA CRM pribadi — OneSender
 
-MVP satu pengguna: kelola kontak, impor CSV, catat persetujuan, buat kampanye teks, jadwalkan, jeda/lanjutkan, dan pantau hasil pengajuan ke OneSender. Tidak ada pendaftaran publik atau tagihan SaaS.
+CRM satu pengguna: kelola kontak, impor CSV, catat persetujuan, tahap prospek, aktivitas dan tindak lanjut manual; buat kampanye teks, jadwalkan, jeda/lanjutkan, dan pantau hasil pengajuan ke OneSender. Tidak ada pendaftaran publik atau tagihan SaaS.
+
+## Memperbarui aplikasi yang sudah berjalan
+
+1. **Backup volume** `wa_crm_data` melalui Coolify sebelum mengganti kode. Database ada di `/data/crm.db`; backup harus mencakup file SQLite beserta WAL saat aplikasi aktif, atau ambil backup ketika aplikasi dihentikan. Jangan hapus volume maupun membuat layanan aplikasi kedua yang memakai volume sama.
+2. Salin isi ZIP ini ke akar repo `waba`, timpa file lama. Commit dan Push origin memakai GitHub Desktop; lalu Redeploy aplikasi **yang sama** di Coolify. Tidak perlu mengganti environment variable, domain, atau membuat layanan baru.
+3. Buka halaman Ringkasan dan Kontak. Saat aplikasi pertama kali dimulai, kolom CRM baru ditambahkan otomatis ke database lama. Kontak, consent, opt-out, kampanye, dan antrean lama tetap ada. Jika muncul masalah, rollback image sebelumnya dan pulihkan backup volume bila diperlukan.
+
+Pada tahap CRM ini, klik nama kontak untuk mengubah tahap (baru/dihubungi/negosiasi/pelanggan/selesai), mencatat aktivitas, dan mengatur tanggal tindak lanjut dalam WIB. Jadwal yang lewat muncul di Ringkasan. Jadwal tidak mengirim pesan otomatis; kosongkan tanggal jika tugas sudah selesai. Formulir profil tidak mengubah izin/nomor secara diam-diam. Kontak opt-out tetap tidak menerima kampanye.
 
 ## Cara deploy di Coolify
 

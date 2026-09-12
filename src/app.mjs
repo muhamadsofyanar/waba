@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS sessions (
  token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS throttle (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until_at INTEGER NOT NULL);`);
 if (!db.prepare('PRAGMA table_info(campaigns)').all().some(x=>x.name==='provider')) db.exec("ALTER TABLE campaigns ADD COLUMN provider TEXT NOT NULL DEFAULT 'onesender'");
+// Add CRM fields in place so existing Coolify volumes keep their contacts and campaigns.
+const contactColumns = new Set(db.prepare('PRAGMA table_info(contacts)').all().map(x=>x.name));
+if (!contactColumns.has('stage')) db.exec("ALTER TABLE contacts ADD COLUMN stage TEXT NOT NULL DEFAULT 'baru'");
+if (!contactColumns.has('follow_up_at')) db.exec('ALTER TABLE contacts ADD COLUMN follow_up_at TEXT');
+db.exec(`CREATE TABLE IF NOT EXISTS contact_activities (
+ id INTEGER PRIMARY KEY, contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS crm_follow_up ON contacts(follow_up_at);
+CREATE INDEX IF NOT EXISTS crm_activity_contact ON contact_activities(contact_id,id);`);
 // A restart during an in-flight HTTP request has an uncertain result: do not repeat it.
 db.exec(`UPDATE deliveries SET state='unknown', error='Proses terhenti saat permintaan dikirim; periksa log OneSender' WHERE state='sending';
 UPDATE campaigns SET state='paused' WHERE state='running' AND id IN (SELECT campaign_id FROM deliveries WHERE state='unknown');`);
@@ -87,7 +96,7 @@ function auth(req) {
 function html(res, title, body, status = 200, session = null, extra = {}) {
   const nav = session ? `<nav><a href="/">Ringkasan</a><a href="/contacts">Kontak</a><a href="/campaigns">Kampanye</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="${esc(session.csrf)}"><button>Keluar</button></form></nav>` : '';
   const page = `<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · WA CRM</title><style>
-  :root{font-family:Inter,system-ui,Arial,sans-serif;color:#162823;background:#f6f8f7}*{box-sizing:border-box}body{margin:0}header{background:#fff;border-bottom:1px solid #d9e4df;padding:17px max(calc((100vw - 1100px)/2),24px);display:flex;align-items:center;gap:32px;flex-wrap:wrap}header strong{color:#08784f;font-size:21px}nav{display:flex;align-items:center;gap:20px;flex-wrap:wrap}a{color:#08784f;text-decoration:none}nav a{font-weight:600}main{max-width:1100px;margin:30px auto;padding:0 24px}h1{font-size:27px;margin:0 0 18px}h2{font-size:19px}section,.card{background:white;border:1px solid #dde6e1;border-radius:13px;padding:22px;margin:16px 0}label{display:block;font-size:14px;font-weight:650;margin:15px 0 5px}input,textarea,select{width:100%;max-width:650px;border:1px solid #cbd8d1;border-radius:8px;font:inherit;padding:11px}input[type=checkbox]{width:auto}textarea{min-height:115px}button,.button{display:inline-block;background:#08784f;color:white;border:0;border-radius:8px;padding:10px 16px;font:inherit;font-weight:650;cursor:pointer;margin:8px 7px 0 0}button.alt{background:#eaf4ef;color:#07573b}.hint{color:#566a61;font-size:14px}.error{color:#a72020}.success{color:#067347}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #e8eeeb;padding:10px;vertical-align:top}th{color:#54645c}td form{display:inline}td button{padding:6px 9px;font-size:13px}.scroll{overflow:auto}.row{display:flex;gap:16px;flex-wrap:wrap}.row>*{flex:1;min-width:190px}.badge{background:#e7f5ec;color:#075e3d;padding:4px 8px;border-radius:5px}code{white-space:pre-wrap;overflow-wrap:anywhere}.stats{font-size:28px;font-weight:750;color:#08784f}small{color:#687b71}@media(max-width:650px){table{min-width:650px}main{margin:18px auto}}
+  :root{font-family:Inter,system-ui,Arial,sans-serif;color:#162823;background:#f5f8f7}*{box-sizing:border-box}body{margin:0}header{background:#fff;border-bottom:1px solid #d9e4df;padding:17px max(calc((100vw - 1100px)/2),24px);display:flex;align-items:center;gap:32px;flex-wrap:wrap}header strong{color:#08784f;font-size:21px}nav{display:flex;align-items:center;gap:20px;flex-wrap:wrap}a{color:#08784f;text-decoration:none}nav a{font-weight:600}main{max-width:1100px;margin:30px auto;padding:0 24px}h1{font-size:27px;margin:0 0 18px}h2{font-size:19px}section,.card{background:white;border:1px solid #dde6e1;border-radius:13px;padding:22px;margin:16px 0;box-shadow:0 2px 9px #143b2210}label{display:block;font-size:14px;font-weight:650;margin:15px 0 5px}input,textarea,select{width:100%;max-width:650px;border:1px solid #cbd8d1;border-radius:8px;font:inherit;padding:11px}input[type=checkbox]{width:auto}textarea{min-height:115px}button,.button{display:inline-block;background:#08784f;color:white;border:0;border-radius:8px;padding:10px 16px;font:inherit;font-weight:650;cursor:pointer;margin:8px 7px 0 0}button.alt{background:#eaf4ef;color:#07573b}.hint{color:#566a61;font-size:14px}.error{color:#a72020}.success{color:#067347}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;border-bottom:1px solid #e8eeeb;padding:10px;vertical-align:top}th{color:#54645c}td form{display:inline}td button{padding:6px 9px;font-size:13px}.scroll{overflow:auto}.row{display:flex;gap:16px;flex-wrap:wrap}.row>*{flex:1;min-width:190px}.badge{background:#e7f5ec;color:#075e3d;padding:4px 8px;border-radius:5px}.timeline{border-left:2px solid #cde3d5;padding:4px 0 4px 18px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}.timeline small{display:block;margin-top:4px}code{white-space:pre-wrap;overflow-wrap:anywhere}.stats{font-size:28px;font-weight:750;color:#08784f}small{color:#687b71}@media(max-width:650px){table{min-width:650px}main{margin:18px auto}}
   </style></head><body><header><strong>WA CRM</strong>${nav}</header><main>${body}</main></body></html>`;
   res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control':'no-store', 'x-content-type-options':'nosniff', 'referrer-policy':'no-referrer', 'content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'", ...extra });
   res.end(page);
@@ -103,6 +112,19 @@ const vals = req => new URLSearchParams(req);
 const get = (s,k) => String(s.get(k) ?? '').trim();
 function contactCount(tag='') { return db.prepare("SELECT count(*) n FROM contacts WHERE consented=1 AND opted_out=0 AND (?='' OR tag=?)").get(tag,tag).n; }
 function cleanTag(v) { if (v.length>60) throw new Error('Tag maksimal 60 karakter'); return v; }
+const stages = ['baru','dihubungi','negosiasi','pelanggan','selesai'];
+const dateWib = iso => iso ? new Date(iso).toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Jakarta'})+' WIB' : 'Belum dijadwalkan';
+function followUpDate(value) {
+  if (!value) return null;
+  if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(value)) throw new Error('Format tanggal tindak lanjut tidak valid');
+  const d=new Date(`${value}:00+07:00`);
+  if (!Number.isFinite(d.getTime()) || new Date(d.getTime()+7*3600000).toISOString().slice(0,16)!==value) throw new Error('Tanggal tindak lanjut tidak valid');
+  return d.toISOString();
+}
+function logActivity(id,kind,content) {
+  if (!content || content.length>1000) throw new Error('Aktivitas wajib diisi, maksimal 1.000 karakter');
+  db.prepare('INSERT INTO contact_activities(contact_id,kind,content) VALUES(?,?,?)').run(id,kind,content);
+}
 function postContact(name, phone, tag, consent, note='') {
   if (!name || name.length>120) throw new Error('Nama wajib diisi, maksimal 120 karakter');
   if (note.length>500) throw new Error('Catatan maksimal 500 karakter');
@@ -118,7 +140,18 @@ function renderContacts(res,s,query) {
   html(res,'Kontak',`<h1>Kontak</h1><p class="hint">Hanya kontak berizin dan belum berhenti berlangganan yang bisa menerima kampanye.</p>
   <section><h2>Tambah / perbarui nomor</h2><form method="post" action="/contacts">${csrf(s)}<div class="row"><div><label>Nama</label><input required maxlength="120" name="name"></div><div><label>Nomor WhatsApp</label><input required name="phone" placeholder="628123456789"></div><div><label>Tag</label><input name="tag" maxlength="60"></div></div><label><input type="checkbox" name="consent" value="yes"> Sudah memberi izin menerima pesan WhatsApp</label><label>Catatan CRM</label><input name="note" maxlength="500"><button>Simpan kontak</button></form></section>
   <section><h2>Impor CSV</h2><p class="hint">Header: name,phone,tag,consent. Simpan CSV sebagai UTF-8. Impor tidak menghapus status opt-out.</p><form method="post" action="/contacts/import">${csrf(s)}<label>Tempel isi CSV</label><textarea required name="csv" placeholder="name,phone,tag,consent&#10;Budi,628123456789,pelanggan,yes"></textarea><button>Impor</button></form></section>
-  <section><h2>Daftar kontak (${contacts.length}${contacts.length===300?'+':''})</h2><form method="get"><input name="q" value="${esc(q)}" placeholder="Cari nama, nomor, atau tag"><button>Cari</button></form><div class="scroll"><table><tr><th>Nama</th><th>Nomor</th><th>Tag</th><th>Izin</th><th>Catatan</th><th>Tindakan</th></tr>${contacts.map(c=>`<tr><td>${esc(c.name)}</td><td>${esc(c.phone)}</td><td>${esc(c.tag)}</td><td>${c.opted_out?'Berhenti':c.consented?'Ya':'Belum'}</td><td>${esc(c.note)}</td><td><form method="post" action="/contacts/${c.id}/optout">${csrf(s)}<button class="alt">${c.opted_out?'Pulihkan tanpa izin':'Berhenti kirim'}</button></form></td></tr>`).join('')}</table></div></section>`,200,s);
+  <section><h2>Daftar kontak (${contacts.length}${contacts.length===300?'+':''})</h2><form method="get"><input name="q" value="${esc(q)}" placeholder="Cari nama, nomor, atau tag"><button>Cari</button></form><div class="scroll"><table><tr><th>Nama</th><th>Nomor</th><th>Tag</th><th>Tahap</th><th>Tindak lanjut</th><th>Izin</th><th>Tindakan</th></tr>${contacts.map(c=>`<tr><td><a href="/contacts/${c.id}">${esc(c.name)}</a></td><td>${esc(c.phone)}</td><td>${esc(c.tag)}</td><td>${esc(c.stage)}</td><td>${esc(dateWib(c.follow_up_at))}</td><td>${c.opted_out?'Berhenti':c.consented?'Ya':'Belum'}</td><td><form method="post" action="/contacts/${c.id}/optout">${csrf(s)}<button class="alt">${c.opted_out?'Pulihkan tanpa izin':'Berhenti kirim'}</button></form></td></tr>`).join('')}</table></div></section>`,200,s);
+}
+function renderContact(res,s,id) {
+  const c=db.prepare('SELECT * FROM contacts WHERE id=?').get(id);
+  if(!c) return err(res,'Kontak tidak ditemukan',s,404);
+  const activities=db.prepare('SELECT * FROM contact_activities WHERE contact_id=? ORDER BY id DESC LIMIT 100').all(id);
+  const deliveries=db.prepare('SELECT d.state,d.updated_at,k.title,k.id campaign_id FROM deliveries d JOIN campaigns k ON k.id=d.campaign_id WHERE d.contact_id=? ORDER BY d.id DESC LIMIT 30').all(id);
+  const localDate=c.follow_up_at ? new Date(new Date(c.follow_up_at).getTime()+7*3600000).toISOString().slice(0,16) : '';
+  html(res,c.name,`<p><a href="/contacts">← Daftar kontak</a></p><h1>${esc(c.name)}</h1><p class="hint">${esc(c.phone)} · ${c.opted_out?'Berhenti berlangganan':c.consented?'Berizin':'Belum memberi izin'}</p>
+  <section><h2>Profil dan tindak lanjut</h2><form method="post" action="/contacts/${id}/profile">${csrf(s)}<div class="row"><div><label>Nama</label><input name="name" required maxlength="120" value="${esc(c.name)}"></div><div><label>Tag segmen</label><input name="tag" maxlength="60" value="${esc(c.tag)}"></div><div><label>Tahap</label><select name="stage">${stages.map(x=>`<option value="${x}" ${c.stage===x?'selected':''}>${x}</option>`).join('')}</select></div></div><label>Jadwal tindak lanjut (WIB)</label><input name="follow_up" type="datetime-local" value="${esc(localDate)}"><p class="hint">Kosongkan tanggal jika tindak lanjut sudah selesai. Tidak mengirim pesan otomatis.</p><label>Catatan profil</label><textarea name="note" maxlength="500">${esc(c.note)}</textarea><button>Simpan profil</button></form></section>
+  <section><h2>Riwayat aktivitas</h2><form method="post" action="/contacts/${id}/activities">${csrf(s)}<label>Catat telepon, chat, pertemuan, atau hasil tindak lanjut</label><textarea name="content" maxlength="1000" required></textarea><button>Tambah aktivitas</button></form>${activities.map(a=>`<div class="timeline">${esc(a.content)}<small>${esc(dateWib(a.created_at.replace(' ','T')+'Z'))}</small></div>`).join('')||'<p class="hint">Belum ada aktivitas.</p>'}</section>
+  <section><h2>Riwayat kampanye</h2><div class="scroll"><table><tr><th>Kampanye</th><th>Status</th><th>Waktu</th></tr>${deliveries.map(d=>`<tr><td><a href="/campaigns/${d.campaign_id}">${esc(d.title)}</a></td><td>${esc(d.state)}</td><td>${esc(dateWib(d.updated_at.replace(' ','T')+'Z'))}</td></tr>`).join('')}</table></div><p class="hint">Status accepted hanya berarti gateway menerima permintaan.</p></section>`,200,s);
 }
 function renderCampaigns(res,s) {
   const campaigns=db.prepare(`SELECT c.*, (SELECT count(*) FROM deliveries d WHERE d.campaign_id=c.id) total,
@@ -211,6 +244,22 @@ export async function handler(req,res) {
       }
       const opt=pathname.match(/^\/contacts\/(\d+)\/optout$/);
       if(opt) {db.prepare('UPDATE contacts SET opted_out=1-opted_out,consented=0 WHERE id=?').run(Number(opt[1]));return redirect(res,'/contacts');}
+      const profile=pathname.match(/^\/contacts\/(\d+)\/profile$/);
+      if(profile) {
+        const id=Number(profile[1]), c=db.prepare('SELECT * FROM contacts WHERE id=?').get(id);
+        if(!c) throw new Error('Kontak tidak ditemukan');
+        const name=get(v,'name'),tag=cleanTag(get(v,'tag')),stage=get(v,'stage'),note=get(v,'note'),followUp=followUpDate(get(v,'follow_up'));
+        if(!name || name.length>120 || note.length>500 || !stages.includes(stage)) throw new Error('Data profil tidak valid');
+        db.prepare('UPDATE contacts SET name=?,tag=?,stage=?,note=?,follow_up_at=? WHERE id=?').run(name,tag,stage,note,followUp,id);
+        return redirect(res,`/contacts/${id}`);
+      }
+      const activity=pathname.match(/^\/contacts\/(\d+)\/activities$/);
+      if(activity) {
+        const id=Number(activity[1]);
+        if(!db.prepare('SELECT id FROM contacts WHERE id=?').get(id)) throw new Error('Kontak tidak ditemukan');
+        logActivity(id,'note',get(v,'content'));
+        return redirect(res,`/contacts/${id}`);
+      }
       if(pathname==='/campaigns') {
         const title=get(v,'title'), body=get(v,'body'), tag=cleanTag(get(v,'tag')), provider=get(v,'provider');
         if(!title||title.length>120||!body||body.length>3000) throw new Error('Judul dan pesan wajib diisi sesuai batas panjang');
@@ -245,9 +294,13 @@ export async function handler(req,res) {
       const n=db.prepare('SELECT count(*) n FROM contacts').get().n;
       const c=db.prepare('SELECT count(*) n FROM campaigns').get().n;
       const a=db.prepare("SELECT count(*) n FROM deliveries WHERE state='accepted'").get().n;
-      return html(res,'Ringkasan',`<h1>Ringkasan</h1><div class="row"><section><small>Kontak</small><div class="stats">${n}</div></section><section><small>Kontak berizin</small><div class="stats">${contactCount()}</div></section><section><small>Kampanye</small><div class="stats">${c}</div></section><section><small>Diterima gateway</small><div class="stats">${a}</div></section></div><section><h2>Mulai dari sini</h2><p>1. Masukkan kontak dan tandai izin yang benar-benar telah diberikan.<br>2. Buat draf kampanye.<br>3. Tinjau jumlah penerima dan mulai pengiriman.</p><p><a class="button" href="/contacts">Kelola kontak</a><a class="button" href="/campaigns">Buka kampanye</a></p></section>`,200,s);
+      const due=db.prepare("SELECT id,name,phone,stage,follow_up_at FROM contacts WHERE follow_up_at IS NOT NULL AND follow_up_at<=? ORDER BY follow_up_at LIMIT 30").all(new Date().toISOString());
+      const upcoming=db.prepare("SELECT id,name,stage,follow_up_at FROM contacts WHERE follow_up_at>? ORDER BY follow_up_at LIMIT 10").all(new Date().toISOString());
+      return html(res,'Ringkasan',`<h1>Ringkasan</h1><p class="hint">Pantau kontak, tindak lanjut, dan pengiriman dari satu tempat.</p><div class="row"><section><small>Kontak</small><div class="stats">${n}</div></section><section><small>Kontak berizin</small><div class="stats">${contactCount()}</div></section><section><small>Perlu ditindaklanjuti</small><div class="stats">${db.prepare('SELECT count(*) n FROM contacts WHERE follow_up_at IS NOT NULL AND follow_up_at<=?').get(new Date().toISOString()).n}</div></section><section><small>Kampanye</small><div class="stats">${c}</div></section><section><small>Diterima gateway</small><div class="stats">${a}</div></section></div><section><h2>Tindak lanjut jatuh tempo</h2>${due.length?`<div class="scroll"><table><tr><th>Kontak</th><th>Tahap</th><th>Jadwal</th></tr>${due.map(x=>`<tr><td><a href="/contacts/${x.id}">${esc(x.name)}</a><br><small>${esc(x.phone)}</small></td><td>${esc(x.stage)}</td><td>${esc(dateWib(x.follow_up_at))}</td></tr>`).join('')}</table></div>`:'<p class="hint">Tidak ada tindak lanjut yang jatuh tempo.</p>'}</section><section><h2>Jadwal berikutnya</h2>${upcoming.length?`<div class="scroll"><table><tr><th>Kontak</th><th>Tahap</th><th>Jadwal</th></tr>${upcoming.map(x=>`<tr><td><a href="/contacts/${x.id}">${esc(x.name)}</a></td><td>${esc(x.stage)}</td><td>${esc(dateWib(x.follow_up_at))}</td></tr>`).join('')}</table></div>`:'<p class="hint">Belum ada jadwal berikutnya.</p>'}<p><a class="button" href="/contacts">Kelola kontak</a><a class="button" href="/campaigns">Buka kampanye</a></p></section>`,200,s);
     }
     if(req.method==='GET' && pathname==='/contacts') return renderContacts(res,s,url.searchParams.get('q'));
+    const contactId=pathname.match(/^\/contacts\/(\d+)$/);
+    if(req.method==='GET' && contactId) return renderContact(res,s,Number(contactId[1]));
     if(req.method==='GET' && pathname==='/campaigns') return renderCampaigns(res,s);
     const id=pathname.match(/^\/campaigns\/(\d+)$/);
     if(req.method==='GET' && id) return renderCampaign(res,s,Number(id[1]));

@@ -49,3 +49,35 @@ for (const provider of ['onesender','starsender']) test(`kontak → kampanye →
     db.close();
   } finally {globalThis.fetch=realFetch;server.close();rmSync(dir,{recursive:true,force:true});}
 });
+
+test('migrasi database lama, profil dan riwayat kontak, serta tindak lanjut', async () => {
+  const dir=mkdtempSync(path.join(tmpdir(),'wacrm-upgrade-'));
+  const database=path.join(dir,'crm.db');
+  const old=new DatabaseSync(database);
+  old.exec(`CREATE TABLE contacts (id INTEGER PRIMARY KEY,name TEXT NOT NULL,phone TEXT NOT NULL UNIQUE,tag TEXT NOT NULL DEFAULT '',consented INTEGER NOT NULL DEFAULT 0,opted_out INTEGER NOT NULL DEFAULT 0,note TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    INSERT INTO contacts(name,phone,consented,note) VALUES('Siti','6281234567890',1,'Sudah pelanggan');`);
+  old.close();
+  Object.assign(process.env,{DATA_DIR:dir,ADMIN_EMAIL:'admin@test.local',ADMIN_PASSWORD:'a strong test password',SESSION_SECRET:'0123456789abcdef0123456789abcdef'});
+  const app=await import('../src/app.mjs?upgrade');
+  const server=http.createServer(app.handler);await new Promise(ok=>server.listen(0,'127.0.0.1',ok));
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const db=new DatabaseSync(database);
+  try {
+    const login=await fetch(base+'/login',{method:'POST',body:new URLSearchParams({email:'admin@test.local',password:'a strong test password'}),redirect:'manual'});
+    const cookie=login.headers.get('set-cookie').split(';')[0];
+    const profile=await fetch(base+'/contacts/1',{headers:{cookie}});
+    assert.equal(profile.status,200);
+    const page=await profile.text();assert.match(page,/Sudah pelanggan/);
+    const csrf=page.match(/name="csrf" value="([0-9a-f]+)"/)[1];
+    const post=async(url,data)=>fetch(base+url,{method:'POST',headers:{cookie,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf,...data}),redirect:'manual'});
+    assert.equal((await post('/contacts/1/profile',{name:'Siti',stage:'negosiasi',tag:'prospek',note:'Hubungi kembali',follow_up:'2020-01-01T09:00'})).status,303);
+    assert.equal((await post('/contacts/1/activities',{content:'Telepon diterima'})).status,303);
+    assert.equal(db.prepare('SELECT stage FROM contacts WHERE id=1').get().stage,'negosiasi');
+    assert.equal(db.prepare('SELECT consented FROM contacts WHERE id=1').get().consented,1);
+    assert.equal(db.prepare('SELECT count(*) n FROM contact_activities').get().n,1);
+    const home=await fetch(base+'/',{headers:{cookie}});assert.match(await home.text(),/Perlu ditindaklanjuti/);
+    assert.equal((await post('/contacts/1/profile',{name:'Siti',stage:'negosiasi',follow_up:'2020-02-31T09:00'})).status,400);
+    assert.equal((await post('/contacts/1/profile',{name:'Siti',stage:'pelanggan',follow_up:''})).status,303);
+    assert.equal(db.prepare('SELECT follow_up_at FROM contacts WHERE id=1').get().follow_up_at,null);
+  } finally {db.close();server.close();rmSync(dir,{recursive:true,force:true});}
+});
