@@ -4,11 +4,12 @@ MVP satu pengguna: kelola kontak, impor CSV, catat persetujuan, buat kampanye te
 
 ## Cara deploy di Coolify
 
-1. Upload seluruh isi folder ini ke **repository GitHub private** (tanpa `.env`).
-2. Di Coolify pilih **Private Git Repository (with Deploy Key)**. Masukkan URL repository dan branch, lalu tambahkan deploy key yang diberikan Coolify ke GitHub pada **Settings → Deploy keys**. Pilih **Docker Compose** sebagai build/deploy jika Coolify meminta jenis aplikasi.
-3. Atur environment variable dari `.env.example` lewat Coolify. `SESSION_SECRET` harus acak dan tetap sama setelah redeploy; contoh membuatnya: `openssl rand -hex 32`. Gunakan API URL **HTTPS** yang benar-benar valid dan API key dari halaman device OneSender. `STARSENDER_DEVICE_API_KEY` opsional, diambil dari menu device StarSender, bukan key akun. Jangan masukkan API key ke GitHub atau chat.
-4. Arahkan domain melalui Coolify ke port aplikasi `3000` dan aktifkan HTTPS. Simpan volume `wa_crm_data` saat redeploy dan siapkan backup volume tersebut secara berkala.
-5. Deploy lalu buka `/login`. Untuk revisi manual: unggah commit ke GitHub dan tekan **Redeploy** di Coolify. Jika menggunakan opsi Private Git (deploy key), deployment tidak otomatis.
+1. Gunakan repository GitHub **public**. Jika repository `waba` milik Anda masih kosong, salin **isi** folder `wa-crm` ke akar repository: `compose.yaml`, `Dockerfile`, `package.json`, `src/`, dan file lainnya. Jika sudah ada proyek lain di `waba`, gunakan repository baru agar file proyek lain tidak tertimpa. Jangan unggah `.env`, database, ekspor kontak, atau tangkapan layar berisi data pribadi.
+2. Di GitHub Desktop buka repository `waba` → **Show in Explorer** → salin file proyek → kembali ke GitHub Desktop → isi pesan commit → **Commit to main** → **Push origin**. Pastikan file yang berubah tidak memuat API key sebelum commit.
+3. Di Coolify pilih **Public Git Repository**, masukkan URL repository public dan branch `main`. Pilih build pack **Docker Compose** dan file `compose.yaml` pada akar repository. Tidak perlu deploy key atau GitHub App.
+4. Atur environment variable dari `.env.example` lewat Coolify. `SESSION_SECRET` harus acak dan tetap sama setelah redeploy; contoh membuatnya: `openssl rand -hex 32`. Gunakan API URL **HTTPS** yang benar-benar valid dan API key dari halaman device OneSender. `STARSENDER_DEVICE_API_KEY` opsional, diambil dari menu device StarSender, bukan key akun. Jangan masukkan API key ke GitHub atau chat.
+5. Arahkan domain melalui Coolify ke port aplikasi `3000` dan aktifkan HTTPS. Simpan volume `wa_crm_data` saat redeploy dan siapkan backup volume tersebut secara berkala.
+6. Deploy lalu buka `/login`. Untuk revisi manual: commit dan **Push origin** di GitHub Desktop, kemudian tekan **Redeploy** di Coolify.
 
 VPS 4 vCPU/8 GB cukup sebagai titik awal untuk satu pengguna. Kode mengirim **satu pesan per interval** (minimal 15 detik), hanya ke kontak yang `consented` dan belum opt-out. Tidak ada janji keamanan nomor dari pemblokiran; patuhi izin penerima dan kebijakan penyedia.
 

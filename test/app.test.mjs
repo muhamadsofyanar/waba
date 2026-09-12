@@ -26,11 +26,15 @@ for (const provider of ['onesender','starsender']) test(`kontak → kampanye →
     const login=await realFetch(base+'/login',{method:'POST',body:new URLSearchParams({email:'admin@test.local',password:'a strong test password'}),redirect:'manual'});
     assert.equal(login.status,303); const cookie=login.headers.get('set-cookie').split(';')[0];
     const page=await realFetch(base+'/contacts',{headers:{cookie}}); const token=(await page.text()).match(/name="csrf" value="([0-9a-f]+)"/)[1];
+    const home=await realFetch(base+'/',{headers:{cookie}});
+    assert.match(await home.text(),/Kontak berizin/);
     const post=async(url,data)=>realFetch(base+url,{method:'POST',headers:{cookie,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf:token,...data}),redirect:'manual'});
     const imported=await post('/contacts/import',{csv:'name,phone,tag,consent\nAlice,081234567890,buyer,yes\nBob,081299999999,buyer,no'});
     assert.equal(imported.status,303);
     const campaign=await post('/campaigns',{title:'Test',body:'Halo {{name}}',tag:'buyer',provider});
     assert.equal(campaign.status,303);const target=campaign.headers.get('location');
+    const draft=await realFetch(base+target,{headers:{cookie}});
+    assert.match(await draft.text(),/Penerima saat ini: 1/);
     const started=await post(target+'/start',{});assert.equal(started.status,303);
     const db=new DatabaseSync(path.join(dir,'crm.db'));
     assert.equal(db.prepare('SELECT count(*) n FROM deliveries').get().n,1);

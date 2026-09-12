@@ -101,7 +101,7 @@ async function read(req, limit=2_500_000) {
 }
 const vals = req => new URLSearchParams(req);
 const get = (s,k) => String(s.get(k) ?? '').trim();
-function contactCount(tag='') { return db.prepare('SELECT count(*) n FROM contacts WHERE consented=1 AND opted_out=0 AND (?="" OR tag=?)').get(tag,tag).n; }
+function contactCount(tag='') { return db.prepare("SELECT count(*) n FROM contacts WHERE consented=1 AND opted_out=0 AND (?='' OR tag=?)").get(tag,tag).n; }
 function cleanTag(v) { if (v.length>60) throw new Error('Tag maksimal 60 karakter'); return v; }
 function postContact(name, phone, tag, consent, note='') {
   if (!name || name.length>120) throw new Error('Nama wajib diisi, maksimal 120 karakter');
