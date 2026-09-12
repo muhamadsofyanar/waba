@@ -1,0 +1,1 @@
+{"name":"wa-crm-onesender","version":"0.1.0","private":true,"type":"module","scripts":{"start":"node src/app.mjs","test":"node --test"},"engines":{"node":">=24"}}

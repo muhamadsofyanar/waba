@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATA_DIR: /data
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET}
+      ONESENDER_API_URL: ${ONESENDER_API_URL}
+      ONESENDER_API_KEY: ${ONESENDER_API_KEY}
+      STARSENDER_DEVICE_API_KEY: ${STARSENDER_DEVICE_API_KEY:-}
+      SEND_INTERVAL_SECONDS: ${SEND_INTERVAL_SECONDS:-30}
+    volumes:
+      - wa_crm_data:/data
+    expose:
+      - "3000"
+volumes:
+  wa_crm_data:
